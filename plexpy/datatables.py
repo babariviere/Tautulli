@@ -81,17 +81,34 @@ class DataTables(object):
 
         args = cw_args + cwu_args + w_args
 
-        # Build the query
-        query = 'SELECT * FROM (SELECT %s FROM %s %s %s %s %s) %s %s' \
+        # Build the base query (without pagination)
+        base_query = 'SELECT * FROM (SELECT %s FROM %s %s %s %s %s) %s %s' \
                 % (extracted_columns['column_string'], table_name, join, c_where, group, union, where, order)
 
-        # logger.debug("Query: %s" % query)
+        # Build filtered count query
+        # Optimize by removing ORDER BY from count query (ORDER BY is not needed for counting)
+        # This significantly improves performance, especially for large tables with GROUP BY
+        # Removing ORDER BY avoids expensive sorting operations when we only need a count
+        base_query_no_order = 'SELECT * FROM (SELECT %s FROM %s %s %s %s %s) %s' % \
+                (extracted_columns['column_string'], table_name, join, c_where, group, union, where)
+        filtered_count_query = 'SELECT COUNT(*) as filtered_count FROM (%s)' % base_query_no_order
 
-        # Execute the query
-        filtered = self.ssp_db.select(query, args=args)
+        filtered_count_result = self.ssp_db.select(filtered_count_query, args=args)
+        filtered_count = filtered_count_result[0]['filtered_count'] if filtered_count_result else 0
 
-        # Remove NULL rows
-        filtered = [row for row in filtered if not all(v is None for v in row.values())]
+        # Build paginated query with LIMIT and OFFSET
+        limit = parameters.get('length', 10)
+        offset = parameters.get('start', 0)
+        paginated_query = base_query + ' LIMIT ? OFFSET ?'
+        paginated_args = args + [limit, offset]
+
+        # logger.debug("Query: %s" % paginated_query)
+
+        # Execute the paginated query
+        result = self.ssp_db.select(paginated_query, args=paginated_args)
+
+        # Remove NULL rows (only on the paginated results, which is much smaller)
+        result = [row for row in result if not all(v is None for v in row.values())]
 
         # Build grand totals
         totalcount = self.ssp_db.select('SELECT COUNT(id) as total_count from %s' % table_name)[0]['total_count']
@@ -99,12 +116,9 @@ class DataTables(object):
         # Get draw counter
         draw_counter = int(parameters['draw'])
 
-        # Paginate results
-        result = filtered[parameters['start']:(parameters['start'] + parameters['length'])]
-
         output = {'result': result,
                   'draw': draw_counter,
-                  'filteredCount': len(filtered),
+                  'filteredCount': filtered_count,
                   'totalCount': totalcount}
 
         return output
